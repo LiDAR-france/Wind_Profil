@@ -119,6 +119,7 @@ def smart_load(input_source):
     
     try:
         if isinstance(input_source, str):
+            # Cas chemin local (ne devrait plus servir pour Clean, mais au cas où)
             if not os.path.exists(input_source): return None
             file_path = input_source
             if file_path.lower().endswith(('.xlsx', '.xls')):
@@ -142,6 +143,7 @@ def smart_load(input_source):
                 try: df = pd.read_csv(file_path, header=0, skiprows=detected_header_row, sep=sep_candidate, encoding=encoding_used, on_bad_lines='skip', low_memory=False)
                 except: df = pd.read_csv(file_path, header=0, skiprows=detected_header_row, sep=None, engine='python', encoding=encoding_used, on_bad_lines='skip')
         else:
+            # Cas UploadedFile (Objet Streamlit)
             filename = input_source.name.lower()
             if filename.endswith(('.xlsx', '.xls')):
                 df = pd.read_excel(input_source)
@@ -195,37 +197,51 @@ with st.expander("Configuration & Import", expanded=True):
     c1, c2, c3 = st.columns(3)
     with c1:
         st.markdown("### 1. Fichier RAW")
-        uploaded_raw = st.file_uploader("Glisser le fichier RAW ici", type=['txt', 'csv', 'xlsx', 'asc'])
+        uploaded_raw = st.file_uploader("Fichier RAW", type=['txt', 'csv', 'xlsx', 'asc'], key="upl_raw")
     with c2:
         st.markdown("### 2. Dossier CLEAN")
-        def_clean_dir = r"Etude\fichiers_profil\sila\cleaned"
-        path_clean_input = st.text_input("Chemin dossier Clean", value=def_clean_dir)
+        # CHANGEMENT ICI : Utilisation de accept_multiple_files=True au lieu de text_input
+        uploaded_clean_files = st.file_uploader(
+            "Sélectionner TOUS les fichiers CLEAN", 
+            type=['txt', 'csv', 'xlsx', 'asc'], 
+            accept_multiple_files=True,
+            key="upl_clean"
+        )
+        if uploaded_clean_files:
+            st.caption(f"{len(uploaded_clean_files)} fichiers sélectionnés.")
+            
     with c3:
         st.markdown("### 3. Before COD (Opt)")
-        uploaded_cod = st.file_uploader("Fichier historique", type=['txt', 'csv', 'xlsx', 'asc'])
+        uploaded_cod = st.file_uploader("Fichier Before COD", type=['txt', 'csv', 'xlsx', 'asc'], key="upl_cod")
     
     n_sect = st.number_input("Nombre de Secteurs", 4, 36, 12)
     intervals, labels = get_sector_config(n_sect)
 
     if st.button("CHARGER ET ANALYSER", type="primary"):
         st.session_state['clean_dfs_cache'] = {} 
+        
+        # 1. RAW
         if uploaded_raw:
             with st.spinner("Lecture RAW..."):
                 st.session_state['data_raw'] = smart_load(uploaded_raw)
                 if st.session_state['data_raw'] is not None: st.success("RAW OK.")
         else: st.error("Manque RAW.")
         
+        # 2. CLEAN (Stockage des objets fichiers dans le dictionnaire)
+        if uploaded_clean_files:
+            # On stocke {nom_fichier: objet_fichier}
+            st.session_state['clean_sources_map'] = {f.name: f for f in uploaded_clean_files}
+            st.success(f"CLEAN : {len(uploaded_clean_files)} fichiers prêts.")
+        else:
+            st.warning("Aucun fichier CLEAN sélectionné.")
+        
+        # 3. BEFORE COD
         if uploaded_cod:
             with st.spinner("Lecture COD..."):
                 st.session_state['data_cod'] = smart_load(uploaded_cod)
                 if st.session_state['data_cod'] is not None: st.success("COD OK.")
         else: st.session_state['data_cod'] = None
 
-        if os.path.exists(path_clean_input) and os.path.isdir(path_clean_input):
-            files = [f for f in os.listdir(path_clean_input) if f.lower().endswith(('.txt', '.csv', '.asc', '.xlsx'))]
-            st.session_state['clean_sources_map'] = {f: os.path.join(path_clean_input, f) for f in files}
-            if files: st.success(f"Clean: {len(files)} fichiers.")
-        else: st.warning("Dossier Clean invalide.")
 
 # ==========================================
 # 5. PLOT & ANALYSE
@@ -233,6 +249,7 @@ with st.expander("Configuration & Import", expanded=True):
 if st.session_state['data_raw'] is not None and st.session_state['clean_sources_map']:
     df_raw = st.session_state['data_raw']
     df_cod = st.session_state['data_cod']
+    # Liste des noms de fichiers disponibles
     available_sources = list(st.session_state['clean_sources_map'].keys())
     
     st.markdown("---")
@@ -245,7 +262,9 @@ if st.session_state['data_raw'] is not None and st.session_state['clean_sources_
             ckey = f"cache_{key}"
             if ckey not in st.session_state['clean_dfs_cache']:
                 with st.spinner(f"Lecture {key}..."):
-                    st.session_state['clean_dfs_cache'][ckey] = smart_load(st.session_state['clean_sources_map'][key])
+                    # On récupère l'objet fichier depuis la map
+                    file_obj = st.session_state['clean_sources_map'][key]
+                    st.session_state['clean_dfs_cache'][ckey] = smart_load(file_obj)
             if st.session_state['clean_dfs_cache'][ckey] is not None:
                 clean_dfs[key] = st.session_state['clean_dfs_cache'][ckey]
 
@@ -254,7 +273,7 @@ if st.session_state['data_raw'] is not None and st.session_state['clean_sources_
             global_waked_sectors = set() 
             figures_ready = {}
 
-            # --- CALCUL PRELIMINAIRE DES SECTEURS TOUCHES (RAW vs CLEAN) ---
+            # --- CALCUL PRELIMINAIRE ---
             for name, df_c in clean_dfs.items():
                 sensors_c = group_columns_by_sensor(df_c)
                 m_check = pd.merge(df_raw[['TimeStamp']], df_c[['TimeStamp']], on='TimeStamp', how='inner')
@@ -315,13 +334,11 @@ if st.session_state['data_raw'] is not None and st.session_state['clean_sources_
 
                 ref_source = st.radio("Source Référence :", ref_options)
                 
-                # --- DOUBLE FILTRE : SECTEURS + TYPE DE DONNEES ---
+                # --- DOUBLE FILTRE ---
                 st.caption("Filtres Référence :")
-                # 1. Choix des secteurs
                 sel_sect_ref = st.multiselect("Secteurs à inclure", all_opts, default=all_opts)
                 sel_idx_ref = [int(s.split(' ')[0]) for s in sel_sect_ref]
                 
-                # 2. Choix du type de points (dans ces secteurs)
                 ref_point_filter = st.radio(
                     "Type de points", 
                     ["Tout", "Points Free (Non-affectés)", "Points Affectés (Waked)"],
@@ -348,15 +365,13 @@ if st.session_state['data_raw'] is not None and st.session_state['clean_sources_
                     colors = ['#EF553B', '#00CC96', '#AB63FA', '#FFA15A', '#19D3F3', '#FF6692', '#B6E880']
                     
                     # =========================================================================
-                    # 1. TRACÉ REF (AVEC DOUBLE FILTRE)
+                    # 1. TRACÉ REF
                     # =========================================================================
                     hv_ref, pr_ref = [], []
                     ref_group_name = "REF_TRACE" 
 
                     if "BEFORE COD" in ref_source and df_cod is not None:
                         # --- BEFORE COD ---
-                        # Note: Impossible de distinguer Free/Waked sur Before COD seul.
-                        # On applique uniquement le filtre Secteur.
                         sensors_cod = group_columns_by_sensor(df_cod)
                         for h in sel_heights:
                             if h in sensors_cod:
@@ -373,16 +388,14 @@ if st.session_state['data_raw'] is not None and st.session_state['clean_sources_
                                     wd_vals = wd_vals.mask(wd_vals > (360 - width/2), wd_vals - 360)
                                     sect_codes = pd.cut(wd_vals, bins=intervals, include_lowest=True).cat.codes
                                     
-                                    # Filtre Secteur
                                     d_filtered = d_cod[sect_codes.isin(sel_idx_ref)]
-                                    
                                     if not d_filtered.empty:
                                         hv_ref.append(h)
                                         pr_ref.append(d_filtered[ws_cod].mean())
                         label_ref_name = "Before COD"
                     
                     else:
-                        # --- RAW ACTUEL (AVEC FILTRE POINT) ---
+                        # --- RAW ACTUEL ---
                         for h in sel_heights:
                             if h in sensors_r:
                                 ws_col, wd_col = sensors_r[h]['WS'], sensors_r[h]['WD']
@@ -390,34 +403,23 @@ if st.session_state['data_raw'] is not None and st.session_state['clean_sources_
                                     for ha in sensors_r: 
                                         if sensors_r[ha]['WD']: wd_col = sensors_r[ha]['WD']; break
                                 if ws_col and wd_col:
-                                    # Préparation DF Raw local
                                     d_raw_h = df_raw[['TimeStamp', ws_col, wd_col]].dropna()
-                                    
-                                    # 1. Calcul Secteurs
                                     width = 360 / n_sect
                                     wd_vals = d_raw_h[wd_col] % 360
                                     wd_vals = wd_vals.mask(wd_vals > (360 - width/2), wd_vals - 360)
                                     sect_codes = pd.cut(wd_vals, bins=intervals, include_lowest=True).cat.codes
                                     
-                                    # 2. Filtre Secteur (Manuel)
                                     d_ref = d_raw_h[sect_codes.isin(sel_idx_ref)].copy()
                                     
-                                    # 3. Filtre Type de Point (Free / Waked)
                                     if not d_ref.empty and ref_point_filter != "Tout":
-                                        # On doit checker si ces points sont Waked par rapport à n'importe quel fichier Clean chargé
                                         is_waked_mask = pd.Series(False, index=d_ref.index)
-                                        
                                         for _, df_c in clean_dfs.items():
                                             sensors_c = group_columns_by_sensor(df_c)
                                             if h in sensors_c:
                                                 ws_c = sensors_c[h]['WS']
-                                                # Merge pour comparer
                                                 m_check = pd.merge(d_ref[['TimeStamp', ws_col]], df_c[['TimeStamp', ws_c]], on='TimeStamp', how='left')
-                                                # Si diff > 0.05, c'est Waked
                                                 m_check['diff'] = (m_check[ws_col] - m_check[ws_c]).abs()
                                                 waked_in_this_file = (m_check['diff'] > 0.05) | (m_check[ws_col].notna() & m_check[ws_c].isna())
-                                                
-                                                # Alignement index pour la mise à jour du masque global
                                                 waked_in_this_file.index = d_ref.index
                                                 is_waked_mask = is_waked_mask | waked_in_this_file
 
@@ -446,7 +448,7 @@ if st.session_state['data_raw'] is not None and st.session_state['clean_sources_
                                                  showlegend=False, legendgroup=ref_group_name))
 
                     # =========================================================================
-                    # 2. TRACÉ CLEAN (COMPARATIF RAW/CLEAN)
+                    # 2. TRACÉ CLEAN
                     # =========================================================================
                     if sel_idx:
                         max_x_seen = 0
@@ -502,7 +504,7 @@ if st.session_state['data_raw'] is not None and st.session_state['clean_sources_
                     else: st.warning("Sélectionnez au moins un secteur d'analyse.")
 
             # ==========================================
-            # 6. TABLEAU COMPARATIF (Moyenne par fichier)
+            # 6. TABLEAU COMPARATIF
             # ==========================================
             st.markdown("---")
             st.header("3. Tableau Comparatif (Synthèse)")
@@ -516,7 +518,7 @@ if st.session_state['data_raw'] is not None and st.session_state['clean_sources_
                 file_raw_means, file_clean_means, file_deltas, total_pts = [], [], [], 0
                 
                 for h_t in common_h_t:
-                    if h_t not in sel_heights: continue # Respecte le filtre hauteur
+                    if h_t not in sel_heights: continue
 
                     ws_r_t = sensors_r[h_t]['WS']
                     ws_c_t = sensors_c_t[h_t]['WS']
@@ -524,7 +526,7 @@ if st.session_state['data_raw'] is not None and st.session_state['clean_sources_
                     if m_t.empty: continue
                     
                     diff_t = (m_t[ws_r_t] - m_t[ws_c_t]).abs()
-                    mask_mod_t = (diff_t > 0.0) | (m_t[ws_r_t].notna() & m_t[ws_c_t].isna())
+                    mask_mod_t = (diff_t > 0.05) | (m_t[ws_r_t].notna() & m_t[ws_c_t].isna())
                     df_final = m_t[mask_mod_t] if calc_mode == "Points modifiés" else m_t
                     
                     if not df_final.empty:
