@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 import re
 import os
 import io
+import gc
 
 # ==========================================
 # 1. CONFIGURATION
@@ -180,6 +181,8 @@ def smart_load(input_source):
 
     for c in df.columns: 
         if c != 'TimeStamp': df[c] = pd.to_numeric(df[c], errors='coerce')
+    for col in df.select_dtypes(include=['float64']).columns:
+        df[col] = df[col].astype('float32')
     return df
 
 # ==========================================
@@ -241,7 +244,7 @@ with st.expander("Configuration & Import", expanded=True):
                 st.session_state['data_cod'] = smart_load(uploaded_cod)
                 if st.session_state['data_cod'] is not None: st.success("COD OK.")
         else: st.session_state['data_cod'] = None
-
+        gc.collect()
 
 # ==========================================
 # 5. PLOT & ANALYSE
@@ -558,3 +561,4 @@ if st.session_state['data_raw'] is not None and st.session_state['clean_sources_
                     use_container_width=True,
                     height=len(global_results) * 35 + 38
                 )
+
